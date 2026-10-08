@@ -1,11 +1,13 @@
-from smolagents import CodeAgent,DuckDuckGoSearchTool, HfApiModel,load_tool,tool
 import datetime
-import requests
-import pytz
-import yaml
-from tools.final_answer import FinalAnswerTool
+import os
+from pathlib import Path
+from urllib.request import getproxies
 
-from Gradio_UI import GradioUI
+import pytz
+from dotenv import load_dotenv
+from smolagents import CodeAgent, GradioUI, OpenAIServerModel, tool
+
+from tools.final_answer import FinalAnswerTool
 
 # Below is an example of a tool that does nothing. Amaze us with your creativity !
 @tool
@@ -34,36 +36,58 @@ def get_current_time_in_timezone(timezone: str) -> str:
         return f"Error fetching time for timezone '{timezone}': {str(e)}"
 
 
-final_answer = FinalAnswerTool()
+def configure_local_proxy_bypass() -> None:
+    """Connect directly to Gradio on localhost while retaining outbound proxies."""
+    # On macOS, setting NO_PROXY alone can hide system proxy discovery.
+    # Preserve the effective HTTP(S)/ALL proxies before adding local exceptions.
+    proxies = getproxies()
+    for scheme in ("http", "https", "all"):
+        if proxies.get(scheme):
+            os.environ.setdefault(f"{scheme}_proxy", proxies[scheme])
 
-# If the agent does not answer, the model is overloaded, please use another model or the following Hugging Face Endpoint that also contains qwen2.5 coder:
-# model_id='https://pflgm2locj2t89co.us-east-1.aws.endpoints.huggingface.cloud' 
-
-model = HfApiModel(
-max_tokens=2096,
-temperature=0.5,
-model_id='Qwen/Qwen2.5-Coder-32B-Instruct',# it is possible that this model may be overloaded
-custom_role_conversions=None,
-)
-
-
-# Import tool from Hub
-image_generation_tool = load_tool("agents-course/text-to-image", trust_remote_code=True)
-
-with open("prompts.yaml", 'r') as stream:
-    prompt_templates = yaml.safe_load(stream)
-    
-agent = CodeAgent(
-    model=model,
-    tools=[final_answer], ## add your tools here (don't remove final answer)
-    max_steps=6,
-    verbosity_level=1,
-    grammar=None,
-    planning_interval=None,
-    name=None,
-    description=None,
-    prompt_templates=prompt_templates
-)
+    bypass_hosts = ["127.0.0.1", "localhost", "::1"]
+    for name in ("NO_PROXY", "no_proxy"):
+        bypass_hosts.extend(
+            host.strip() for host in os.getenv(name, "").split(",") if host.strip()
+        )
+    bypass = ",".join(dict.fromkeys(bypass_hosts))
+    os.environ["NO_PROXY"] = bypass
+    os.environ["no_proxy"] = bypass
 
 
-GradioUI(agent).launch()
+def create_agent() -> CodeAgent:
+    # Environment variables take precedence over the local .env file.
+    load_dotenv(Path(__file__).with_name(".env"))
+    configure_local_proxy_bypass()
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError(
+            "请设置 DEEPSEEK_API_KEY：复制 .env.example 为 .env，"
+            "填入你的 DeepSeek API Key，或在运行环境中设置该变量。"
+        )
+
+    model = OpenAIServerModel(
+        model_id=os.getenv("DEEPSEEK_MODEL", "deepseek-flash"),
+        api_base="https://api.deepseek.com",
+        api_key=api_key,
+        flatten_messages_as_text=True,
+        temperature=0.1,
+        max_tokens=2048,
+        # CodeAgent uses generated Python code as actions. Non-thinking mode
+        # lets the older adapter exchange ordinary chat messages throughout.
+        extra_body={"thinking": {"type": "disabled"}},
+        client_kwargs={"timeout": 120.0},
+    )
+
+    # Use prompts bundled with smolagents 1.13.0: the course's prompts.yaml
+    # predates the final_answer fallback required by this version.
+    return CodeAgent(
+        model=model,
+        tools=[FinalAnswerTool(), get_current_time_in_timezone],
+        max_steps=6,
+        verbosity_level=1,
+    )
+
+
+if __name__ == "__main__":
+    GradioUI(create_agent()).launch(share=False, server_name="127.0.0.1")

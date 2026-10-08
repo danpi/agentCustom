@@ -1,5 +1,11 @@
 markdownify
-smolagents==1.13.0
+smolagents[openai]==1.13.0
+openai>=1.58.1,<2.0
+gradio==5.49.1
+huggingface-hub>=0.28.0,<1.0
+python-dotenv
+pytz
+PyYAML
 requests
 duckduckgo_search
 pandas
